@@ -9,6 +9,7 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+import numpy as np
 
 from ultralytics.nn.modules import (
     AIFI,
@@ -428,6 +429,9 @@ class SegmentationModel(DetectionModel):
         results = []
         device = next(self.parameters()).device
         B = batch["img"].shape[0]  # number of images in this batch
+
+        indices = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+        batch = self.build_custom_batch(indices)
         
         print(f"Batch dict keys: {batch.keys()}")
         for key in batch.keys():
@@ -490,6 +494,43 @@ class SegmentationModel(DetectionModel):
             results.append((im_path, single_loss.item()))
 
         return results
+
+    def build_custom_batch(self, indices):
+        """Build a custom batch from cached images."""
+        dataset = self.train_loader.dataset
+        batch = {
+            'img': [],
+            'batch_idx': [],
+            'cls': [],
+            'bboxes': [],
+            'masks': [],
+            'im_file': []
+        }
+        
+        for i, idx in enumerate(indices):
+            if dataset.ims[idx] is not None:
+                img = dataset.ims[idx]
+            else:
+                img, _, _ = dataset.load_image(idx)
+            
+            batch['img'].append(img)
+            batch['im_file'].append(dataset.im_files[idx])
+            
+            label = dataset.labels[idx]
+            batch['cls'].append(label['cls'])
+            batch['bboxes'].append(label['bboxes'])
+            batch['batch_idx'].extend([i] * len(label['cls']))
+
+        # Stack and convert to tensor
+        batch['img'] = torch.from_numpy(np.stack(batch['img']))
+        batch['cls'] = torch.cat(batch['cls'])
+        batch['bboxes'] = torch.cat(batch['bboxes'])
+        batch['batch_idx'] = torch.tensor(batch['batch_idx'])
+        
+        # Apply preprocessing
+        batch = self.trainer.preprocess_batch(batch)
+        
+        return batch
 
 
 class PoseModel(DetectionModel):

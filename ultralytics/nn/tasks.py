@@ -1,4 +1,4 @@
-# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+# Ultralytics YOLO 🚀, AGPL-3.0 license
 
 import contextlib
 import pickle
@@ -7,7 +7,6 @@ import types
 from copy import deepcopy
 from pathlib import Path
 
-import thop
 import torch
 import torch.nn as nn
 
@@ -51,7 +50,6 @@ from ultralytics.nn.modules import (
     HGBlock,
     HGStem,
     ImagePoolingAttn,
-    Index,
     Pose,
     RepC3,
     RepConv,
@@ -61,7 +59,6 @@ from ultralytics.nn.modules import (
     RTDETRDecoder,
     SCDown,
     Segment,
-    TorchVision,
     WorldDetect,
     v10Detect,
 )
@@ -86,6 +83,11 @@ from ultralytics.utils.torch_utils import (
     scale_img,
     time_sync,
 )
+
+try:
+    import thop
+except ImportError:
+    thop = None
 
 
 class BaseModel(nn.Module):
@@ -409,6 +411,85 @@ class SegmentationModel(DetectionModel):
     def init_criterion(self):
         """Initialize the loss criterion for the SegmentationModel."""
         return v8SegmentationLoss(self)
+
+    def compute_per_image_loss(self, batch):
+        """
+        Compute segmentation loss for each image in the batch separately.
+
+        Args:
+            batch (dict): A dictionary containing at least:
+                          'img' -> Tensor for the entire batch of shape (B, C, H, W)
+                          'bboxes', 'cls', 'masks', 'batch_idx' -> Tensors listing all labels/targets.
+                          'im_file' (or 'path') -> List of image file paths, length B
+
+        Returns:
+            List[Tuple[str, float]]: A list of (image_path, loss_value) for each image in the batch.
+        """
+        results = []
+        device = next(self.parameters()).device
+        B = batch["img"].shape[0]  # number of images in this batch
+        
+        print(f"Batch dict keys: {batch.keys()}")
+        for key in batch.keys():
+            print(f"Type of {key}: {type(batch[key])}")
+        
+        for key in batch.keys():
+            # Save torch tensors of the batch dict
+            root_dir = "/home/andrei/projects/crack-detection-experiments/batch_tensors"
+            torch.save(batch[key], f"{root_dir}/{key}.pt")
+
+        for i in range(B):
+            # 1) Slice out the single image to shape (1, C, H, W)
+            single_img = batch["img"][i].unsqueeze(0).to(device)
+            
+            print(f"batch['img'] type = {type(batch['img'])}")
+            # print(f"batch['img'] = {batch['img']}")
+            # print(f"batch['img'][i] = {batch['img'][i]}")
+            # print(f"batch['img'][i].shape = {batch['img'][i].shape}")
+
+            # 2) Identify annotations (bboxes, classes, masks) belonging to this image
+            mask_i = (batch["batch_idx"] == i)
+            single_bboxes = batch["bboxes"][mask_i].to(device)
+            single_cls = batch["cls"][mask_i].to(device)
+            print(f"mask_i = {mask_i}")
+            print(f"single_bboxes = {single_bboxes}")
+            print(f"single_cls = {single_cls}")
+            print(f"batch['masks'] = {batch['masks']}")
+            im_path = batch["im_file"][i] if "im_file" in batch else f"image_{i}"
+            # Write mask to a file
+            # torch.save(batch['masks'][i], "/home/andrei/projects/crack-detection-experiments/mask.txt")
+            
+            print(f"Image path: {im_path}")
+            print(f"masks shape: {batch['masks'].shape}")
+            print(f"Shape mask_i: {mask_i.shape}")
+            single_masks = batch["masks"][i].to(device)  # shape depends on how your dataset is structured
+
+            # 3) Build a "single-image" batch dict
+            single_batch = {
+                "img": single_img,
+                "bboxes": single_bboxes,
+                "cls": single_cls,
+                "masks": single_masks,
+                # Create new batch_idx set to 0 since there's only one image in this "mini-batch"
+                "batch_idx": torch.zeros_like(single_cls, dtype=torch.int64, device=device)
+            }
+
+    
+
+            # 4) Forward pass and loss calculation for one image
+            single_preds = self.forward(single_img)
+            print(f"single_preds = {len(single_preds)}")
+            print(f"single_preds[1] = {single_preds[1]}")
+            single_loss, _ = self.loss(single_preds, single_batch)  # returns (loss_value, loss_items)
+
+            # 5) Get image path (or filename) from batch
+            #    Adjust key name (e.g. 'im_file', 'path') to match your dataset loader
+            im_path = batch["im_file"][i] if "im_file" in batch else f"image_{i}"
+
+            # 6) Append result for this image
+            results.append((im_path, single_loss.item()))
+
+        return results
 
 
 class PoseModel(DetectionModel):
@@ -1050,7 +1131,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 m.legacy = legacy
         elif m is RTDETRDecoder:  # special case, channels arg must be passed in index 1
             args.insert(1, [ch[x] for x in f])
-        elif m in {CBLinear, TorchVision, Index}:
+        elif m is CBLinear:
             c2 = args[0]
             c1 = ch[f]
             args = [c1, c2, *args[1:]]

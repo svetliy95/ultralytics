@@ -719,3 +719,31 @@ def save_dataset_cache_file(prefix, path, x, version):
         LOGGER.info(f"{prefix}New cache created: {path}")
     else:
         LOGGER.warning(f"{prefix}WARNING ⚠️ Cache directory {path.parent} is not writeable, cache not saved.")
+
+
+def segments2masks(segments, height, width, overlap=False, downsample_ratio=1):
+    """
+    Convert segments to masks
+    Args:
+        segments: list of segment polygons, each polygon is numpy array of shape (N, 2) containing x,y coordinates
+        height: original image height
+        width: original image width
+        overlap: if True, masks will be overlapped and sorted by area
+        downsample_ratio: ratio to downsample masks (e.g., 4 means masks will be 1/4 of original size)
+    """
+    if overlap:
+        masks, sorted_idx = polygons2masks_overlap(
+            (height, width), 
+            segments,
+            downsample_ratio=downsample_ratio
+        )
+        masks = masks[None]  # (H, W) -> (1, H, W)
+        return masks, sorted_idx
+    else:
+        masks = polygons2masks(
+            (height, width), 
+            segments,
+            color=1,
+            downsample_ratio=downsample_ratio
+        )
+        return masks

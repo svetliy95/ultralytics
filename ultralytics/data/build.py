@@ -92,6 +92,8 @@ def seed_worker(worker_id):  # noqa
 def build_yolo_dataset(cfg, img_path, batch, data, mode="train", rect=False, stride=32, multi_modal=False):
     """Build YOLO Dataset."""
     dataset = YOLOMultiModalDataset if multi_modal else YOLODataset
+    # Set stride to 32 if it is not provided
+    stride = 32 if stride is None else stride
     return dataset(
         img_path=img_path,
         imgsz=cfg.imgsz,

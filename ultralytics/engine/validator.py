@@ -36,6 +36,8 @@ from ultralytics.utils.checks import check_imgsz
 from ultralytics.utils.ops import Profile
 from ultralytics.utils.torch_utils import de_parallel, select_device, smart_inference_mode
 
+import os
+from datetime import datetime
 
 class BaseValidator:
     """
@@ -76,9 +78,20 @@ class BaseValidator:
             pbar (tqdm.tqdm): Progress bar for displaying progress.
             args (SimpleNamespace): Configuration for the validator.
             _callbacks (dict): Dictionary to store various callback functions.
+            custom_val_dir (str): Directory to save validation losses.
+            custom_train_dir (str): Directory to save training losses.
         """
         self.args = get_cfg(overrides=args)
         self.dataloader = dataloader
+        self.custom_dataloader_val = None
+        self.custom_dataloader_train = None
+        self.losses_folder = '/home/andrei/projects/yolo-image-loss/losses'
+        self.custom_val_dir = '/home/andrei/projects/yolo-image-loss/truncated_data_16/valid/images'
+        self.custom_train_dir = '/home/andrei/projects/yolo-image-loss/truncated_data_16/train/images'
+        # Create the folder if it doesn't exist
+        os.makedirs(self.losses_folder, exist_ok=True)
+        # Generate file name containing current timestamp in human readable format
+        self.losses_file_basename = f"losses_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.txt"
         self.pbar = pbar
         self.stride = None
         self.data = None
@@ -119,6 +132,13 @@ class BaseValidator:
             self.loss = torch.zeros_like(trainer.loss_items, device=trainer.device)
             self.args.plots &= trainer.stopper.possible_stop or (trainer.epoch == trainer.epochs - 1)
             model.eval()
+            # Data loader for custom evaluation
+            if self.custom_dataloader_val is None:
+                self.custom_dataloader_val = self.get_dataloader(dataset_path=self.custom_val_dir, batch_size=1)
+            if self.custom_dataloader_train is None:
+                self.custom_dataloader_train = self.get_dataloader(dataset_path=self.custom_train_dir, batch_size=1)   
+            
+            
         else:
             if str(self.args.model).endswith(".yaml") and model is None:
                 LOGGER.warning("WARNING ⚠️ validating an untrained model YAML will result in 0 mAP.")
@@ -199,6 +219,12 @@ class BaseValidator:
         self.speed = dict(zip(self.speed.keys(), (x.t / len(self.dataloader.dataset) * 1e3 for x in dt)))
         self.finalize_metrics()
         self.print_results()
+        
+        # Run custom evaluation
+        if self.training:
+            self.run_custom_evaluation(model, dt, 'train', trainer)
+            self.run_custom_evaluation(model, dt, 'val', trainer)
+            
         self.run_callbacks("on_val_end")
         if self.training:
             model.float()
@@ -218,6 +244,55 @@ class BaseValidator:
             if self.args.plots or self.args.save_json:
                 LOGGER.info(f"Results saved to {colorstr('bold', self.save_dir)}")
             return stats
+        
+    def run_custom_evaluation(self, model, dt, split, trainer=None):
+        """Run custom evaluation."""
+        path_to_save_losses = os.path.join(self.losses_folder, self.losses_file_basename)
+        # Get last index of the 
+        loss_list = []
+        
+        if split == 'train':
+            dataloader = self.custom_dataloader_train
+        else:
+            dataloader = self.custom_dataloader_val
+            
+        current_epoch = trainer.epoch if trainer else -1  # Get current epoch or -1 if not training
+        
+        bar = TQDM(dataloader, desc=f"Custom evaluation ({split})", total=len(dataloader))
+        
+        for batch_i, batch in enumerate(bar):
+            # Preprocess
+            with dt[0]:
+                batch = self.preprocess(batch)
+
+            # Inference
+            with dt[1]:
+                preds = model(batch["img"], augment=False)
+
+            # Loss
+            with dt[2]:
+                loss = model.loss(batch, preds)
+                
+            sum_loss, (box_loss, seg_loss, cls_loss, dfl_loss) = loss
+            
+            # Store the loss for the current image
+            loss_list.append(
+                {
+                    "im_file": batch['im_file'],
+                    "sum": float(sum_loss),
+                    "box": float(box_loss),
+                    "seg": float(seg_loss),
+                    "cls": float(cls_loss),
+                    "dfl": float(dfl_loss),
+                    "split": split,
+                    "epoch": current_epoch
+                }
+            )
+
+        with open(path_to_save_losses, 'a') as f:
+            for im_loss in loss_list:
+                f.write(f"{im_loss},\n")
+        
 
     def match_predictions(self, pred_classes, true_classes, iou, use_scipy=False):
         """
